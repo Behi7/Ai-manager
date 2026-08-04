@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+aiogram>=3.6.0
+anthropic
+pydantic-settings
+SQLAlchemy[asyncio]
+asyncpg
+alembic
+APScheduler
+httpx
+python-dotenv
