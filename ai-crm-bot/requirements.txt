@@ -2,9 +2,10 @@ fastapi
 uvicorn[standard]
 aiogram>=3.6.0
 anthropic
+google-generativeai
 pydantic-settings
 SQLAlchemy[asyncio]
-asyncpg
+aiosqlite
 alembic
 APScheduler
 httpx

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, create_model
 
-from .config import FIELDS, FIELD_BY_KEY
+from . import fields
+
+logger = logging.getLogger(__name__)
 
 
 _FIELD_TYPES = {
@@ -16,7 +19,7 @@ _FIELD_TYPES = {
 
 _fields: dict[str, Any] = {}
 
-for field in FIELDS:
+for field in fields.FIELDS:
     base = _FIELD_TYPES.get(field["type"])
     if base is None:
         raise ValueError(f"Unsupported field type: {field['type']}")
@@ -27,6 +30,9 @@ _fields["missing_fields"] = (list[str], Field(default_factory=list))
 _fields["invalid_fields"] = (list[str], Field(default_factory=list))
 
 ExtractionResult = create_model("ExtractionResult", **_fields)
+
+# Создаем словарь для быстрого доступа к полям по ключу
+FIELD_BY_KEY = {field["key"]: field for field in fields.FIELDS}
 
 
 class TalkerResponse(BaseModel):
@@ -72,13 +78,29 @@ def validate_field(key: str, value: Any) -> bool:
     return True
 
 
-def post_validate_extraction(raw: ExtractionResult) -> ExtractionResult:
+def post_validate_extraction(raw: ExtractionResult, original_llm_data: dict[str, Any] | None = None) -> ExtractionResult:
+    logger.info(f"=== POST_VALIDATE START ===")
+    logger.info(f"NEW VERSION - with original_llm_data parameter")
+    logger.info(f"Input raw: {raw.model_dump()}")
+    logger.info(f"Original LLM data: {original_llm_data}")
+
     data = raw.model_dump()
+
+    # Если есть исходные данные от LLM, используем их для восстановления полей
+    if original_llm_data:
+        logger.info(f"Restoring fields from LLM data")
+        for field in fields.FIELDS:
+            key = field["key"]
+            if key in original_llm_data and original_llm_data[key] is not None:
+                data[key] = original_llm_data[key]
+                logger.info(f"Restored {key} = {original_llm_data[key]}")
+
+    logger.info(f"Data after LLM restore: {data}")
 
     missing: list[str] = []
     invalid: list[str] = []
 
-    for field in FIELDS:
+    for field in fields.FIELDS:
         key = field["key"]
         value = data.get(key)
 
@@ -98,4 +120,9 @@ def post_validate_extraction(raw: ExtractionResult) -> ExtractionResult:
     else:
         data["status"] = "incomplete"
 
-    return ExtractionResult.model_validate(data)
+    logger.info(f"Data before validation: {data}")
+
+    result = ExtractionResult.model_validate(data)
+    logger.info(f"post_validate result: {result.model_dump()}")
+    logger.info(f"=== POST_VALIDATE END ===")
+    return result

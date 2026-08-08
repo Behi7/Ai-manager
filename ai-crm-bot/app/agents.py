@@ -1,13 +1,26 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 from typing import Any
 
-from anthropic import AsyncAnthropic
+import httpx
 
-from .config import FIELDS, FIELD_BY_KEY, settings
+try:
+    from anthropic import AsyncAnthropic
+except ImportError:  # pragma: no cover
+    AsyncAnthropic = None
+
+try:
+    import google.generativeai as genai
+except ImportError:  # pragma: no cover
+    genai = None
+
+from . import fields
+from .fields import FIELD_BY_KEY
+from .config import settings
 from .prompts import (
     CLASSIFICATION_SYSTEM,
     SUMMARY_SYSTEM,
@@ -24,7 +37,11 @@ from .schemas import (
 
 logger = logging.getLogger(__name__)
 
-_client = AsyncAnthropic(api_key=settings.anthropic_api_key) if settings.anthropic_api_key else None
+_anthropic_client = (
+    AsyncAnthropic(api_key=settings.anthropic_api_key)
+    if AsyncAnthropic and settings.anthropic_api_key
+    else None
+)
 
 
 def _strip_json(text: str) -> str:
@@ -60,7 +77,18 @@ def _to_anthropic_messages(history: list[dict[str, str]]) -> list[dict[str, str]
     return messages
 
 
-async def _request_json(
+def _to_gemini_prompt(system: str, history: list[dict[str, str]]) -> str:
+    lines = [system.strip()]
+
+    for item in history:
+        role = "Пользователь" if item["role"] == "user" else "Ассистент"
+        lines.append(f"{role}: {item['content']}")
+
+    lines.append("Ответ должен быть только JSON без markdown и пояснений:")
+    return "\n\n".join(lines)
+
+
+async def _request_anthropic_json(
     system: str,
     history: list[dict[str, str]],
     model: str,
@@ -69,12 +97,12 @@ async def _request_json(
 ) -> dict[str, Any]:
     fallback = fallback or {}
 
-    if _client is None:
+    if _anthropic_client is None:
         logger.warning("Anthropic API key is not configured")
         return fallback
 
     try:
-        response = await _client.messages.create(
+        response = await _anthropic_client.messages.create(
             model=model,
             max_tokens=max_tokens,
             system=system,
@@ -93,10 +121,187 @@ async def _request_json(
         return fallback
 
 
+async def _request_gemini_json(
+    system: str,
+    history: list[dict[str, str]],
+    model: str,
+    max_tokens: int = 1024,
+    fallback: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    fallback = fallback or {}
+
+    if genai is None:
+        logger.warning("Gemini package is not installed")
+        return fallback
+
+    if not settings.gemini_api_key:
+        logger.warning("Gemini API key is not configured")
+        return fallback
+
+    genai.configure(api_key=settings.gemini_api_key)
+    llm = genai.GenerativeModel(model_name=model)
+    prompt = _to_gemini_prompt(system, history)
+
+    try:
+        response = await llm.generate_content_async(
+            prompt,
+            generation_config={
+                "temperature": 0.0,
+                "max_output_tokens": max_tokens,
+            },
+        )
+
+        text = getattr(response, "text", None) or ""
+
+        return _parse_json(text)
+    except Exception as e:
+        logger.exception("LLM request failed")
+
+        # If the model is no longer available, try a safe fallback (talker model).
+        try:
+            msg = str(e)
+        except Exception:
+            msg = ""
+
+        if "no longer available" in msg and model != settings.talker_model:
+            try:
+                logger.info("Attempting fallback to talker model %s", settings.talker_model)
+                genai.configure(api_key=settings.gemini_api_key)
+                fallback_llm = genai.GenerativeModel(model_name=settings.talker_model)
+                response2 = await fallback_llm.generate_content_async(
+                    prompt,
+                    generation_config={"temperature": 0.0, "max_output_tokens": max_tokens},
+                )
+                text2 = getattr(response2, "text", None) or ""
+                return _parse_json(text2)
+            except Exception:
+                logger.exception("Fallback LLM request failed")
+
+        return fallback
+
+
+async def _request_groq_json(
+    system: str,
+    history: list[dict[str, str]],
+    model: str,
+    max_tokens: int = 1024,
+    fallback: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    fallback = fallback or {}
+
+    if not settings.groq_api_key:
+        logger.warning("Groq API key is not configured")
+        return fallback
+
+    prompt = _to_gemini_prompt(system, history)
+    payload = {
+        "model": model,
+        "input": prompt,
+        "max_output_tokens": max_tokens,
+        "temperature": 0.0,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.post(
+                settings.groq_api_url,
+                headers={
+                    "Authorization": f"Bearer {settings.groq_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+            response.raise_for_status()
+            text = _extract_groq_text(response.json())
+            return _parse_json(text)
+    except Exception:
+        logger.exception("LLM request failed")
+        return fallback
+
+
+def _extract_groq_text(payload: Any) -> str:
+    if isinstance(payload, dict):
+        output = payload.get("output")
+
+        if isinstance(output, str):
+            return output
+
+        if isinstance(output, list):
+            parts: list[str] = []
+            for item in output:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    content = item.get("content")
+                    if isinstance(content, str):
+                        parts.append(content)
+                    elif isinstance(content, list):
+                        parts.extend(str(chunk) for chunk in content)
+                    else:
+                        parts.append(json.dumps(item, ensure_ascii=False))
+                else:
+                    parts.append(str(item))
+            return "".join(parts)
+
+        if isinstance(payload.get("text"), str):
+            return payload["text"]
+
+        if payload.get("response") is not None:
+            return json.dumps(payload["response"], ensure_ascii=False)
+
+    return json.dumps(payload, ensure_ascii=False) if payload is not None else ""
+
+
+async def _request_json(
+    system: str,
+    history: list[dict[str, str]],
+    model: str,
+    max_tokens: int = 1024,
+    fallback: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    provider = settings.llm_provider.strip().lower()
+
+    if provider == "gemini":
+        return await _request_gemini_json(
+            system=system,
+            history=history,
+            model=model,
+            max_tokens=max_tokens,
+            fallback=fallback,
+        )
+
+    if provider == "anthropic":
+        return await _request_anthropic_json(
+            system=system,
+            history=history,
+            model=model,
+            max_tokens=max_tokens,
+            fallback=fallback,
+        )
+
+    if provider == "groq":
+        return await _request_groq_json(
+            system=system,
+            history=history,
+            model=model,
+            max_tokens=max_tokens,
+            fallback=fallback,
+        )
+
+    logger.warning("Unknown LLM provider %s, using Anthropic fallback", settings.llm_provider)
+    return await _request_anthropic_json(
+        system=system,
+        history=history,
+        model=model,
+        max_tokens=max_tokens,
+        fallback=fallback,
+    )
+
+
 def _fallback_summary(draft: dict[str, Any]) -> str:
     lines = []
 
-    for field in FIELDS:
+    for field in fields.FIELDS:
         value = draft.get(field["key"])
         if value not in (None, ""):
             lines.append(f"{field['label']}: {value}")
@@ -116,16 +321,20 @@ async def talker_reply(
     extra_instruction: str = "",
 ) -> TalkerResponse:
     fallback = {
-        "reply": "Здравствуйте! Я пока не могу обработать сообщение, потому что не настроен LLM-ключ.",
+        "reply": "Извините, у меня технические проблемы с AI-сервисом. Пожалуйста, попробуйте позже или свяжитесь с менеджером.",
         "ready_to_check": False,
     }
 
-    data = await _request_json(
-        system=talker_system_prompt(extra_instruction),
-        history=history,
-        model=settings.talker_model,
-        fallback=fallback,
-    )
+    try:
+        data = await _request_json(
+            system=talker_system_prompt(extra_instruction),
+            history=history,
+            model=settings.talker_model,
+            fallback=fallback,
+        )
+    except Exception as e:
+        logger.exception(f"LLM request failed for talker_reply: {e}")
+        return TalkerResponse.model_validate(fallback)
 
     try:
         return TalkerResponse.model_validate(data)
@@ -135,7 +344,7 @@ async def talker_reply(
 
 
 async def classify_confirmation(history: list[dict[str, str]]) -> Classification:
-    if _client is None:
+    if _anthropic_client is None:
         last_user = next(
             (item["content"] for item in reversed(history) if item["role"] == "user"),
             "",
@@ -154,12 +363,16 @@ async def classify_confirmation(history: list[dict[str, str]]) -> Classification
         }
         return Classification(confirmed=confirmed)
 
-    data = await _request_json(
-        system=CLASSIFICATION_SYSTEM,
-        history=history,
-        model=settings.talker_model,
-        fallback={"confirmed": False},
-    )
+    try:
+        data = await _request_json(
+            system=CLASSIFICATION_SYSTEM,
+            history=history,
+            model=settings.talker_model,
+            fallback={"confirmed": False},
+        )
+    except Exception as e:
+        logger.exception(f"LLM request failed for classify_confirmation: {e}")
+        return Classification(confirmed=False)
 
     try:
         return Classification.model_validate(data)
@@ -176,12 +389,16 @@ async def summarize_draft(draft: dict[str, Any]) -> str:
         }
     ]
 
-    data = await _request_json(
-        system=SUMMARY_SYSTEM,
-        history=history,
-        model=settings.talker_model,
-        fallback={"reply": _fallback_summary(draft), "ready_to_check": False},
-    )
+    try:
+        data = await _request_json(
+            system=SUMMARY_SYSTEM,
+            history=history,
+            model=settings.talker_model,
+            fallback={"reply": _fallback_summary(draft), "ready_to_check": False},
+        )
+    except Exception as e:
+        logger.exception(f"LLM request failed for summarize_draft: {e}")
+        return _fallback_summary(draft)
 
     try:
         return TalkerResponse.model_validate(data).reply
@@ -191,42 +408,84 @@ async def summarize_draft(draft: dict[str, Any]) -> str:
 
 
 async def extract(history: list[dict[str, str]]) -> ExtractionResult:
-    fallback = {field["key"]: None for field in FIELDS}
+    logger.info(f"=== EXTRACT START ===")
+    logger.info(f"History length: {len(history)}")
+    logger.info(f"History: {history}")
+    logger.info(f"Fields: {[f['key'] for f in fields.FIELDS]}")
+
+    fallback = {field["key"]: None for field in fields.FIELDS}
     fallback.update(
         {
             "status": "incomplete",
-            "missing_fields": [field["key"] for field in FIELDS if field.get("required")],
+            "missing_fields": [field["key"] for field in fields.FIELDS if field.get("required")],
             "invalid_fields": [],
         }
     )
+    logger.info(f"Fallback: {fallback}")
 
-    data = await _request_json(
-        system=extractor_system_prompt(),
-        history=history,
-        model=settings.extractor_model,
-        max_tokens=2048,
-        fallback=fallback,
-    )
+    try:
+        data = await _request_json(
+            system=extractor_system_prompt(),
+            history=history,
+            model=settings.extractor_model,
+            max_tokens=2048,
+            fallback=fallback,
+        )
+        logger.info(f"LLM extractor raw response: {data}")
+    except Exception as e:
+        logger.exception(f"LLM request failed for extract: {e}")
+        data = fallback
+
+    # If the extractor returned an incomplete result (possible model unavailable
+    # or returned non-JSON), try once more using the talker model as a fallback.
+    try:
+        status = data.get("status")
+    except Exception:
+        status = None
+
+    if status != "complete" and settings.talker_model and settings.talker_model != settings.extractor_model:
+        logger.info("Extractor incomplete — retrying with talker model %s", settings.talker_model)
+        data2 = await _request_json(
+            system=extractor_system_prompt(),
+            history=history,
+            model=settings.talker_model,
+            max_tokens=2048,
+            fallback=fallback,
+        )
+
+        try:
+            if data2.get("status") == "complete":
+                data = data2
+        except Exception:
+            pass
 
     try:
         result = ExtractionResult.model_validate(data)
+        logger.info(f"ExtractionResult after model_validate: {result.model_dump()}")
     except Exception:
         logger.exception("Invalid extractor response")
         result = ExtractionResult.model_validate(fallback)
 
-    return post_validate_extraction(result)
+    validated = post_validate_extraction(result, data)
+    logger.info(f"ExtractionResult after post_validate: {validated.model_dump()}")
+
+    return validated
 
 
 async def correct_field(
     history: list[dict[str, str]],
     draft: dict[str, Any],
 ) -> dict[str, Any] | None:
-    data = await _request_json(
-        system=correction_system_prompt(draft),
-        history=history,
-        model=settings.extractor_model,
-        fallback={"field_key": None, "value": None},
-    )
+    try:
+        data = await _request_json(
+            system=correction_system_prompt(draft),
+            history=history,
+            model=settings.extractor_model,
+            fallback={"field_key": None, "value": None},
+        )
+    except Exception as e:
+        logger.exception(f"LLM request failed for correct_field: {e}")
+        return None
 
     field_key = data.get("field_key")
     value = data.get("value")

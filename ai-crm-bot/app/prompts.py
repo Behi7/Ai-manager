@@ -1,15 +1,28 @@
 import json
 
-from .config import FIELDS, FIELD_BY_KEY
+from . import fields
 
 
 def _human_fields() -> str:
-    return ", ".join(field["label"].lower() for field in FIELDS)
+    # Показываем только обязательные поля (теперь все поля обязательные, т.к. только с *)
+    required_fields = [field for field in fields.FIELDS if field.get("required", False)]
+    return ", ".join(field["label"].lower() for field in required_fields)
 
 
-TALKER_SYSTEM = f"""Ты — консультант компании по установке кондиционеров для дома.
+def _required_fields() -> list[dict]:
+    """Возвращает только обязательные поля"""
+    return [field for field in fields.FIELDS if field.get("required", False)]
 
-Твоя задача — естественно, по-человечески, без ощущения анкеты собрать данные клиента: {_human_fields()}.
+
+def talker_system_prompt(extra_instruction: str = "") -> str:
+    """Генерирует системный промпт для talker динамически, с актуальными полями"""
+    human_fields = _human_fields()
+    
+    base_prompt = f"""Ты — консультант компании по продаже недвижимости.
+
+Твоя задача — естественно, по-человечески, без ощущения анкеты собрать данные клиента: {human_fields}.
+
+Если клиент не дал необходимые данные — вежливо попроси их.
 
 Важно:
 - Ты не должен говорить клиенту про JSON, CRM, парсинг, поля, статусы и технические детали.
@@ -18,6 +31,7 @@ TALKER_SYSTEM = f"""Ты — консультант компании по уст
 - Не придумывай данные за клиента.
 - Если клиент даёт несколько данных сразу — нормально продолжать разговор с учётом этого.
 - Не вызывай CRM и не принимай финальных решений о завершении заявки.
+- ЗАПРЕЩЕНО задавать более одного вопроса за раз! Только один конкретный вопрос.
 
 Формат ответа строго JSON без markdown и пояснений:
 {{"reply": "текст ответа клиенту", "ready_to_check": false}}
@@ -26,6 +40,8 @@ TALKER_SYSTEM = f"""Ты — консультант компании по уст
 - true, если клиент дал содержательный ответ, который нужно проверить экстрактором;
 - false, если это приветствие, маленький разговор или нужно просто продолжить беседу.
 """
+    
+    return base_prompt + extra_instruction
 
 
 CLASSIFICATION_SYSTEM = """Ты классифицируешь ответ клиента на этапе подтверждения заявки.
@@ -66,21 +82,21 @@ CORRECTION_SYSTEM_TEMPLATE = """Клиент хочет исправить да�
 """
 
 
-def talker_system_prompt(extra_instruction: str = "") -> str:
-    return TALKER_SYSTEM + extra_instruction
+
 
 
 def correction_system_prompt(draft: dict) -> str:
     return CORRECTION_SYSTEM_TEMPLATE.format(
         draft=json.dumps(draft, ensure_ascii=False),
-        fields=", ".join(FIELD_BY_KEY.keys()),
+        fields=", ".join(fields.FIELD_BY_KEY.keys()),
     )
 
 
 def extractor_system_prompt() -> str:
+    # Используем все поля, но обязательные помечены
     lines = []
 
-    for field in FIELDS:
+    for field in fields.FIELDS:
         validation = field.get("validation") or "нет"
         lines.append(
             f"- {field['key']}: label={field['label']}, "
@@ -88,14 +104,35 @@ def extractor_system_prompt() -> str:
             f"validation={validation}"
         )
 
-    example = {field["key"]: None for field in FIELDS}
+    required_fields = [field for field in fields.FIELDS if field.get("required", False)]
+    example = {field["key"]: None for field in fields.FIELDS}
     example.update(
         {
             "status": "incomplete",
-            "missing_fields": [field["key"] for field in FIELDS if field.get("required")][:1],
+            "missing_fields": [field["key"] for field in required_fields if field.get("required")][:1],
             "invalid_fields": [],
         }
     )
+
+    # Динамические правила валидации на основе полей
+    validation_rules = []
+    for field in fields.FIELDS:
+        key = field["key"]
+        label = field["label"]
+        field_type = field["type"]
+        required = field.get("required", False)
+        
+        if key == "phone":
+            validation_rules.append(f"- {key} должен строго соответствовать {field.get('validation')}")
+        elif field_type == "float":
+            validation_rules.append(f"- {key} должен быть числом")
+        elif field_type == "str":
+            if required:
+                validation_rules.append(f"- {label} должен быть непустой строкой")
+            else:
+                validation_rules.append(f"- {label} опциональное поле")
+        elif field_type == "bool":
+            validation_rules.append(f"- {key} должен быть true или false")
 
     return f"""Ты — извлекатель данных из истории диалога.
 
@@ -106,16 +143,15 @@ def extractor_system_prompt() -> str:
 Если клиент менял значение поля несколько раз — бери последнее упоминание.
 Если клиент дал несколько полей в одном сообщении — извлекай их все.
 
+Извлекай ВСЕ поля, которые есть в диалоге, но status=complete только если ВСЕ обязательные поля присутствуют и валидны.
+
 Верни только JSON без markdown и пояснений.
 
-Поля:
+Все поля:
 {chr(10).join(lines)}
 
 Правила валидации:
-- phone должен строго соответствовать ^\\+998\\d{{9}}$
-- sqm должен быть положительным числом
-- address должен быть конкретным адресом; формулировки вроде "в районе Юнусабада" считать невалидными
-- name и budget должны быть непустыми строками
+{chr(10).join(validation_rules)}
 - status=complete только если все required поля присутствуют и валидны
 - missing_fields — required поля, для которых нет значения
 - invalid_fields — поля, где значение есть, но оно невалидно

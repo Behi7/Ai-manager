@@ -1,0 +1,316 @@
+АНАЛИЗ ВЗАИМОДЕЙСТВИЯ С AMOCRM
+================================================================================
+
+1. ЧТО ПОЛУЧАЕТ КОД ОТ GET ЗАПРОСОВ В AMOCRM
+================================================================================
+
+GET запросы к amoCRM API (выполняются в app/amo.py):
+
+1. GET /api/v4/contacts/custom_fields
+   - Получает список кастомных полей контактов
+   - Возвращает массив полей с id, name, type, code
+   - Пример ответа:
+     {
+       "_embedded": {
+         "custom_fields": [
+           {
+             "id": 123456,
+             "name": "Email",
+             "type": "text",
+             "code": "EMAIL"
+           }
+         ]
+       }
+     }
+
+2. GET /api/v4/leads/custom_fields
+   - Получает список кастомных полей сделок
+   - Возвращает массив полей с id, name, type, code
+   - Пример ответа:
+     {
+       "_embedded": {
+         "custom_fields": [
+           {
+             "id": 789012,
+             "name": "Адрес",
+             "type": "text",
+             "code": "ADDRESS"
+           }
+         ]
+       }
+     }
+
+Эти запросы выполняются методом get_account_custom_fields() в app/amo.py (строки 372-407)
+
+
+================================================================================
+2. КАК ПРЕОБРАЗУЮТСЯ ДАННЫЕ ИЗ AMOCRM В ПОЛЯ ДЛЯ ЗАПОЛНЕНИЯ
+================================================================================
+
+Функция generate_fields_from_amocrm() в app/service.py (строки 34-179):
+
+Шаг 1: Добавление системных полей
+- name (Имя) - контакт, обязательное
+- phone (Номер телефона) - контакт, обязательное
+
+Шаг 2: Обработка полей сделок (leads)
+- Поля с * в названии считаются обязательными
+- Сортировка: сначала обязательные, потом остальные
+- Формируется ключ: lead_{field_id}
+- Пример: поле с id=789012 и name="*Адрес" →
+  {
+    "key": "lead_789012",
+    "label": "Адрес",
+    "type": "str",
+    "required": true,
+    "amo_target": "lead",
+    "amo_field_id": 789012,
+    "validation": null
+  }
+
+Шаг 3: Обработка полей контактов (contacts)
+- Пропускается поле PHONE (системное)
+- Поля с * в названии считаются обязательными
+- Формируется ключ: contact_{field_id}
+- Пример: поле с id=123456 и name="Email" →
+  {
+    "key": "contact_123456",
+    "label": "Email",
+    "type": "str",
+    "required": false,
+    "amo_target": "contact",
+    "amo_field_id": 123456,
+    "validation": null
+  }
+
+Шаг 4: Ограничение по количеству (amo_fields_limit)
+- По умолчанию limit=5
+- Добавляется не более указанного количества полей
+
+
+================================================================================
+3. КАКИЕ ПОЛЯ ПЫТАЕТСЯ ЗАПОЛНИТЬ КОД
+================================================================================
+
+Системные поля (всегда):
+1. name → contact.name (имя контакта)
+2. phone → contact.custom_fields_values (field_code=PHONE)
+
+Поля сделок (полученные из amoCRM):
+- Все поля с ключом lead_{id} отправляются в lead.custom_fields_values
+- Каждое поле соответствует field_id в amoCRM
+
+Поля контактов (полученные из amoCRM):
+- Все поля с ключом contact_{id} отправляются в contact.custom_fields_values
+- Каждое поле соответствует field_id в amoCRM
+
+
+================================================================================
+4. ДЕФОЛТНЫЕ ПОЛЯ (ЕСЛИ НЕ УДАЛОСЬ ЗАГРУЗИТЬ ИЗ AMOCRM)
+================================================================================
+
+Из app/fields.py (DEFAULT_FIELDS):
+
+1. name
+   - label: "Имя"
+   - type: str
+   - required: true
+   - amo_target: contact
+   - amo_field_id: null
+
+2. phone
+   - label: "Номер телефона"
+   - type: str
+   - required: true
+   - amo_target: contact
+   - amo_field_id: null
+   - validation: "^\\+998\\d{9}$"
+
+3. address
+   - label: "Адрес"
+   - type: str
+   - required: true
+   - amo_target: lead
+   - amo_field_id: 123456
+
+4. sqm
+   - label: "Площадь комнаты, м²"
+   - type: float
+   - required: true
+   - amo_target: lead
+   - amo_field_id: 123457
+
+5. budget
+   - label: "Бюджет"
+   - type: str
+   - required: true
+   - amo_target: lead
+   - amo_field_id: 123458
+
+
+================================================================================
+5. КАК ФОРМИРУЕТСЯ PAYLOAD ДЛЯ СОЗДАНИЯ КОНТАКТА
+================================================================================
+
+Метод _contact_payload() в app/amo.py (строки 98-112):
+
+Входные данные (draft):
+{
+  "name": "Иван Иванов",
+  "phone": "+998901234567",
+  "contact_123456": "email@example.com"
+}
+
+Выходные данные (payload):
+{
+  "name": ["Иван Иванов"],
+  "custom_fields_values": [
+    {
+      "field_code": "PHONE",
+      "values": [{"value": "+998901234567"}]
+    },
+    {
+      "field_id": 123456,
+      "values": [{"value": "email@example.com"}]
+    }
+  ]
+}
+
+POST запрос: /api/v4/contacts
+
+
+================================================================================
+6. КАК ФОРМИРУЕТСЯ PAYLOAD ДЛЯ СОЗДАНИЯ СДЕЛКИ
+================================================================================
+
+Метод _lead_payload() в app/amo.py (строки 195-226):
+
+Входные данные (draft):
+{
+  "name": "Иван Иванов",
+  "lead_789012": "Ташкент, ул. Примерная",
+  "lead_789013": 50.5
+}
+
+Выходные данные (payload):
+{
+  "name": ["Заявка: Иван Иванов"],
+  "_embedded": {
+    "contacts": [{"id": 12345}]
+  },
+  "custom_fields_values": [
+    {
+      "field_id": 789012,
+      "values": [{"value": "Ташкент, ул. Примерная"}]
+    },
+    {
+      "field_id": 789013,
+      "values": [{"value": "50.5"}]
+    }
+  ]
+}
+
+POST запрос: /api/v4/leads
+
+
+================================================================================
+7. ПОТОК ДАННЫХ ПРИ ЗАПУСКЕ ПРИЛОЖЕНИЯ
+================================================================================
+
+main.py → lifespan()
+  ↓
+service.py → generate_fields_from_amocrm(limit)
+  ↓
+amo.py → get_account_custom_fields()
+  ├─→ GET /api/v4/contacts/custom_fields
+  └─→ GET /api/v4/leads/custom_fields
+  ↓
+Обработка данных:
+  ├─→ Добавление системных полей (name, phone)
+  ├─→ Обработка полей сделок (приоритет обязательным *)
+  └─→ Обработка полей контактов
+  ↓
+fields.py → update_fields(new_fields)
+  ├─→ Обновление глобальной переменной FIELDS
+  └─→ Обновление глобальной переменной FIELD_BY_KEY
+  ↓
+Приложение готово к работе
+
+
+================================================================================
+8. ПОТОК ДАННЫХ ПРИ СОЗДАНИИ КОНТАКТА И СДЕЛКИ
+================================================================================
+
+Пользователь вводит данные в чат-боте
+  ↓
+Данные собираются в словарь draft:
+{
+  "name": "Иван",
+  "phone": "+998901234567",
+  "lead_789012": "Адрес",
+  "lead_789013": 50.5
+}
+  ↓
+amo.py → create_contact(draft)
+  ├─→ _contact_payload(draft)
+  │  ├─→ name → payload["name"]
+  │  └─→ custom_fields → payload["custom_fields_values"]
+  └─→ POST /api/v4/contacts
+  ↓
+amo.py → create_lead(draft, contact_id)
+  ├─→ _lead_payload(draft, contact_id)
+  │  ├─→ name → payload["name"]
+  │  ├─→ contact_id → payload["_embedded"]["contacts"]
+  │  └─→ custom_fields → payload["custom_fields_values"]
+  └─→ POST /api/v4/leads
+
+
+================================================================================
+9. СООТВЕТСТВИЕ ПОЛЕЙ
+================================================================================
+
+Ключ в draft              → Поле в amoCRM
+───────────────────────────────────────────────────────
+name                      → contact.name (системное)
+phone                     → contact.custom_fields_values
+                           (field_code=PHONE)
+lead_{field_id}           → lead.custom_fields_values
+                           (field_id={field_id})
+contact_{field_id}        → contact.custom_fields_values
+                           (field_id={field_id})
+
+Примеры:
+draft["lead_789012"]      → lead.custom_fields_values[0].field_id = 789012
+                          → lead.custom_fields_values[0].values[0].value = "адрес"
+
+draft["contact_123456"]   → contact.custom_fields_values[0].field_id = 123456
+                          → contact.custom_fields_values[0].values[0].value = "email"
+
+
+================================================================================
+10. КЛЮЧЕВЫЕ ФАЙЛЫ И МЕТОДЫ
+================================================================================
+
+app/amo.py:
+- get_account_custom_fields() - получение кастомных полей
+- _contact_custom_fields() - формирование полей контакта
+- _contact_payload() - формирование payload для контакта
+- _lead_custom_fields() - формирование полей сделки
+- _lead_payload() - формирование payload для сделки
+- create_contact() - создание контакта
+- create_lead() - создание сделки
+
+app/service.py:
+- generate_fields_from_amocrm() - генерация полей из amoCRM
+
+app/fields.py:
+- update_fields() - обновление глобальных переменных FIELDS
+- DEFAULT_FIELDS - дефолтные поля
+
+app/main.py:
+- lifespan() - запуск при старте приложения
+
+
+================================================================================
+АНАЛИЗ ЗАВЕРШЕН
+================================================================================
