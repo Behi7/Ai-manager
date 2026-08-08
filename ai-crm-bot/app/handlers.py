@@ -23,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 router = Router()
 
-# --- НАЧАЛО ИЗМЕНЕНИЙ ---
 # Хранилище ID обработанных сообщений
 _processed_message_ids = set()
 # Ограниченная очередь для очистки старых ID
@@ -35,6 +34,7 @@ _lock = Lock()
 _pending_messages = {}  # {user_id: {"messages": [], "timer": None, "last_message_time": datetime}}
 _debounce_lock = Lock()
 
+
 def is_duplicate_message(message_id: int) -> bool:
     """
     Проверяет, обрабатывалось ли сообщение с таким ID ранее.
@@ -42,16 +42,16 @@ def is_duplicate_message(message_id: int) -> bool:
     with _lock:
         if message_id in _processed_message_ids:
             return True
-        
+
         # Добавляем ID в хранилище
         _processed_message_ids.add(message_id)
         _message_id_queue.append(message_id)
-        
+
         # Очищаем хранилище от старых ID, превышающих maxlen очереди
         while len(_processed_message_ids) > len(_message_id_queue):
             old_id = _message_id_queue.popleft()
             _processed_message_ids.discard(old_id)
-            
+
         return False
 
 
@@ -62,22 +62,22 @@ async def process_pending_messages(user_id: int, bot):
     with _debounce_lock:
         if user_id not in _pending_messages:
             return
-        
+
         pending = _pending_messages[user_id]
         messages = pending["messages"]
-        
+
         if not messages:
             del _pending_messages[user_id]
             return
-        
+
         # Объединяем все сообщения в один текст
         combined_text = " ".join(messages)
-        
+
         # Очищаем pending
         del _pending_messages[user_id]
-        
+
         logger.info(f"Processing combined messages for user {user_id}: {combined_text[:100]}")
-        
+
         try:
             await handle_user_message(bot, user_id, combined_text)
         except Exception as e:
@@ -90,13 +90,13 @@ async def add_pending_message(user_id: int, text: str, bot):
     """
     with _debounce_lock:
         current_time = datetime.now(timezone.utc)
-        
+
         if user_id in _pending_messages:
             # Отменяем старый таймер
             old_timer = _pending_messages[user_id]["timer"]
             if old_timer:
                 old_timer.cancel()
-            
+
             # Добавляем новое сообщение
             _pending_messages[user_id]["messages"].append(text)
             _pending_messages[user_id]["last_message_time"] = current_time
@@ -107,16 +107,15 @@ async def add_pending_message(user_id: int, text: str, bot):
                 "timer": None,
                 "last_message_time": current_time
             }
-        
+
         # Создаем новый таймер
         timer = asyncio.create_task(
             asyncio.sleep(settings.message_debounce_seconds)
         )
         timer.add_done_callback(lambda t: asyncio.create_task(process_pending_messages(user_id, bot)))
-        
+
         _pending_messages[user_id]["timer"] = timer
         logger.info(f"Added pending message for user {user_id}, timer reset for {settings.message_debounce_seconds}s")
-# --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
 
 @router.message(F.text == "/reset")
