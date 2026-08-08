@@ -264,7 +264,6 @@ async def get_history(
     ]
 
 
-# --- НАЧАЛО ИЗМЕНЕНИЙ ---
 async def update_crm_with_draft(
     session,
     conversation: Conversation,
@@ -274,9 +273,7 @@ async def update_crm_with_draft(
     Обновляет контакт и лид в amoCRM с новыми данными из draft.
     Вызывается после успешного извлечения данных.
     """
-    logger.info(f"=== UPDATE CRM WITH DRAFT ===")
-    logger.info(f"Conversation ID: {conversation.id}")
-    logger.info(f"Draft: {draft}")
+    logger.info(f"Updating CRM with draft for conversation {conversation.id}")
 
     contact = await session.get(TelegramContact, conversation.telegram_user_id)
 
@@ -284,11 +281,8 @@ async def update_crm_with_draft(
         logger.warning(f"No amoCRM contact for user {conversation.telegram_user_id}, skipping update")
         return
 
-    logger.info(f"Found contact with amo_contact_id: {contact.amo_contact_id}")
-
     try:
         # Обновляем контакт
-        logger.info(f"Calling update_contact for contact {contact.amo_contact_id}")
         await amo_client.update_contact(contact.amo_contact_id, draft)
         logger.info(f"Updated amoCRM contact {contact.amo_contact_id} with new data")
     except Exception as e:
@@ -308,14 +302,9 @@ async def update_crm_with_draft(
     result = await session.execute(stmt)
     last_submission = result.scalar_one_or_none()
 
-    logger.info(f"Last submission: {last_submission}")
-    if last_submission:
-        logger.info(f"Last submission lead_id: {last_submission.amo_lead_id}")
-
     if last_submission and last_submission.amo_lead_id:
         try:
             # Обновляем лид
-            logger.info(f"Calling update_lead for lead {last_submission.amo_lead_id}")
             await amo_client.update_lead(last_submission.amo_lead_id, draft, contact.amo_contact_id)
             logger.info(f"Updated amoCRM lead {last_submission.amo_lead_id} with new data")
         except Exception as e:
@@ -423,7 +412,6 @@ async def log_message_to_amocrm(
         logger.info(f"Logged message to amoCRM for conversation {conversation.id}, lead {lead_id}")
     except Exception as e:
         logger.exception(f"Failed to log message to amoCRM for conversation {conversation.id}: {e}")
-# --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
 
 async def append_message(
@@ -469,10 +457,8 @@ async def send_and_log(
         text,
         raw_response,
     )
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
     # Отправить сообщение в amoCRM
     await log_message_to_amocrm(session, conversation, "talker", text)
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
 
 async def get_latest_conversation(session, user_id: int) -> Conversation | None:
@@ -632,12 +618,11 @@ async def process_crm_queue_item(bot: Bot, session, item: CrmQueueItem) -> None:
         return
 
     try:
-        # Находим существующий лид для этой беседы
+        # Находим существующий лид для этой беседы (ищем по всем статусам, кроме failed)
         stmt = (
             select(CrmSubmission)
             .where(
                 CrmSubmission.conversation_id == item.conversation_id,
-                CrmSubmission.status == "success",
                 CrmSubmission.amo_lead_id.isnot(None)
             )
             .order_by(CrmSubmission.created_at.desc())
@@ -772,12 +757,11 @@ async def handoff(
             contact = await session.get(TelegramContact, conversation.telegram_user_id)
             existing_contact_id = contact.amo_contact_id if contact else None
 
-            # Находим существующий лид для этой беседы
+            # Находим существующий лид для этой беседы (ищем по всем статусам, кроме failed)
             stmt = (
                 select(CrmSubmission)
                 .where(
                     CrmSubmission.conversation_id == conversation.id,
-                    CrmSubmission.status == "success",
                     CrmSubmission.amo_lead_id.isnot(None)
                 )
                 .order_by(CrmSubmission.created_at.desc())
@@ -875,12 +859,11 @@ async def submit_to_crm(
     contact = await session.get(TelegramContact, conversation.telegram_user_id)
     existing_contact_id = contact.amo_contact_id if contact else None
 
-    # Находим существующий лид для этой беседы
+    # Находим существующий лид для этой беседы (ищем по всем статусам, кроме failed)
     stmt = (
         select(CrmSubmission)
         .where(
             CrmSubmission.conversation_id == conversation.id,
-            CrmSubmission.status == "success",
             CrmSubmission.amo_lead_id.isnot(None)
         )
         .order_by(CrmSubmission.created_at.desc())
@@ -1175,10 +1158,8 @@ async def handle_user_message(
 
             logger.info("Appending user message")
             await append_message(session, conversation, "user", text)
-            # --- НАЧАЛО ИЗМЕНЕНИЙ ---
             logger.info("Logging message to amoCRM")
             await log_message_to_amocrm(session, conversation, "user", text)
-            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
             if conversation.state == State.CONFIRMING:
                 logger.info("Processing CONFIRMING state")

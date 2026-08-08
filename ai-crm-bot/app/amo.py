@@ -380,8 +380,6 @@ class AmoCRMClient:
 
         return contact_id, lead_id
 
-    # --- НАЧАЛО ИЗМЕНЕНИЙ ---
-    # Эта функция добавляется в конец класса AmoCRMClient
     async def create_note(self, element_id: int, note_type: str, text: str, element_type: str = "lead"):
         """
         Создает заметку в amoCRM.
@@ -392,12 +390,10 @@ class AmoCRMClient:
         :param text: Текст заметки.
         :param element_type: 'lead' или 'contact'. По умолчанию 'lead'.
         """
-        # Определяем, к какому элементу относится заметка
         if element_type not in ["lead", "contact"]:
             raise ValueError("element_type must be 'lead' or 'contact'")
 
-        # Формируем правильный множественное число для URL
-        entity_type_plural = f"{element_type}s"  # leads или contacts
+        entity_type_plural = f"{element_type}s"
 
         payload = [
             {
@@ -410,17 +406,15 @@ class AmoCRMClient:
         ]
 
         try:
-            # amoCRM API для заметок - правильный эндпоинт
             data = await self._request(
                 "POST",
                 f"/api/v4/{entity_type_plural}/{element_id}/notes",
                 json=payload,
             )
-            logger.info(f"Note added to {element_type} {element_id} in amoCRM: {data}")
+            logger.info(f"Note added to {element_type} {element_id} in amoCRM")
         except AmoCRMError as e:
             logger.error(f"Failed to add note to {element_type} {element_id} in amoCRM: {e}")
-            raise # Пробрасываем ошибку, чтобы вызывающий код мог отреагировать
-    # --- КОНЕЦ ИЗМЕНЕНИЙ ---
+            raise
 
     async def get_account_custom_fields(self) -> dict[str, Any]:
         """

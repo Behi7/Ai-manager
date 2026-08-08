@@ -1,5 +1,38 @@
-﻿.env
+```
+# Python
 __pycache__/
 *.pyc
-*.db
+*.pyo
+*.pyd
+
+# Environment
 .venv/
+venv/
+env/
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Coverage reports
+coverage/
+htmlcov/
+.coverage
+
+# IDE
+.vscode/
+.idea/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+```
