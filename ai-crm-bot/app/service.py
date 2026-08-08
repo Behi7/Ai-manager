@@ -618,12 +618,11 @@ async def process_crm_queue_item(bot: Bot, session, item: CrmQueueItem) -> None:
         return
 
     try:
-        # Находим существующий лид для этой беседы
+        # Находим существующий лид для этой беседы (ищем по всем статусам, кроме failed)
         stmt = (
             select(CrmSubmission)
             .where(
                 CrmSubmission.conversation_id == item.conversation_id,
-                CrmSubmission.status == "success",
                 CrmSubmission.amo_lead_id.isnot(None)
             )
             .order_by(CrmSubmission.created_at.desc())
@@ -758,12 +757,11 @@ async def handoff(
             contact = await session.get(TelegramContact, conversation.telegram_user_id)
             existing_contact_id = contact.amo_contact_id if contact else None
 
-            # Находим существующий лид для этой беседы
+            # Находим существующий лид для этой беседы (ищем по всем статусам, кроме failed)
             stmt = (
                 select(CrmSubmission)
                 .where(
                     CrmSubmission.conversation_id == conversation.id,
-                    CrmSubmission.status == "success",
                     CrmSubmission.amo_lead_id.isnot(None)
                 )
                 .order_by(CrmSubmission.created_at.desc())
@@ -861,12 +859,11 @@ async def submit_to_crm(
     contact = await session.get(TelegramContact, conversation.telegram_user_id)
     existing_contact_id = contact.amo_contact_id if contact else None
 
-    # Находим существующий лид для этой беседы
+    # Находим существующий лид для этой беседы (ищем по всем статусам, кроме failed)
     stmt = (
         select(CrmSubmission)
         .where(
             CrmSubmission.conversation_id == conversation.id,
-            CrmSubmission.status == "success",
             CrmSubmission.amo_lead_id.isnot(None)
         )
         .order_by(CrmSubmission.created_at.desc())
